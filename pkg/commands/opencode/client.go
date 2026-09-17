@@ -1,7 +1,6 @@
 package opencode
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -33,15 +32,23 @@ func NewClient(baseURL, providerID, modelID string) *Client {
 }
 
 func NewDefaultClient() *Client {
-	return NewClient("http://localhost:4096", "github-copilot", "gemini-3-flash-preview")
+	return NewClient("http://localhost:4096", "", "")
 }
 
 func (c *Client) EnsureRunning() error {
-	if err := c.TestConnection(); err == nil {
-		return nil
+	if c.cmd != nil && c.cmd.Process != nil {
+		return c.TestConnection()
 	}
 
-	c.cmd = exec.Command("opencode", "serve", "--pure", "--port", "4096")
+	if err := c.TestConnection(); err == nil {
+		if err := c.ensureDefaultModel(); err == nil {
+			return nil
+		}
+	}
+
+	c.killExistingServer()
+
+	c.cmd = exec.Command("opencode", "serve", "--port", "4096")
 	if err := c.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start opencode server: %w", err)
 	}
@@ -55,6 +62,11 @@ func (c *Client) EnsureRunning() error {
 	}
 
 	return fmt.Errorf("timed out waiting for opencode server to start")
+}
+
+func (c *Client) killExistingServer() {
+	exec.Command("sh", "-c", "lsof -ti :4096 | xargs kill 2>/dev/null").Run()
+	time.Sleep(500 * time.Millisecond)
 }
 
 func (c *Client) Stop() {
@@ -99,9 +111,42 @@ type Part struct {
 	Text string `json:"text,omitempty"`
 }
 
-type SSEEvent struct {
-	Type       string          `json:"type"`
-	Properties json.RawMessage `json:"properties"`
+type providerResponse struct {
+	Connected []string          `json:"connected"`
+	Default   map[string]string `json:"default"`
+}
+
+func (c *Client) ensureDefaultModel() error {
+	if c.providerID != "" && c.modelID != "" {
+		return nil
+	}
+
+	resp, err := c.httpClient.Get(c.baseURL + "/provider")
+	if err != nil {
+		return fmt.Errorf("failed to list providers: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to list providers: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var providers providerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&providers); err != nil {
+		return fmt.Errorf("failed to decode providers: %w", err)
+	}
+
+	for _, providerID := range providers.Connected {
+		modelID, ok := providers.Default[providerID]
+		if ok && modelID != "" {
+			c.providerID = providerID
+			c.modelID = modelID
+			return nil
+		}
+	}
+
+	return fmt.Errorf("no connected OpenCode providers found; run `opencode providers login`")
 }
 
 func (c *Client) createSession() (*Session, error) {
@@ -130,7 +175,7 @@ func (c *Client) createSession() (*Session, error) {
 	return &session, nil
 }
 
-func (c *Client) sendMessageAsync(sessionID string, prompt string) error {
+func (c *Client) sendMessage(sessionID string, prompt string) (string, error) {
 	requestBody := PromptRequest{
 		Model: &ModelSpec{
 			ProviderID: c.providerID,
@@ -143,28 +188,37 @@ func (c *Client) sendMessageAsync(sessionID string, prompt string) error {
 
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	url := fmt.Sprintf("%s/session/%s/message", c.baseURL, sessionID)
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to send message: %w", err)
+		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to send message: status %d, body: %s", resp.StatusCode, string(body))
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read message response: %w", err)
 	}
 
-	return nil
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to send message: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var message MessageResponse
+	if err := json.Unmarshal(body, &message); err != nil {
+		return "", fmt.Errorf("failed to decode message response: %w", err)
+	}
+
+	return c.extractAssistantResponse([]MessageResponse{message}), nil
 }
 
 func (c *Client) waitForIdleWithPolling(sessionID string, timeout time.Duration) error {
@@ -195,64 +249,6 @@ func (c *Client) waitForIdleWithPolling(sessionID string, timeout time.Duration)
 			}
 		}
 	}
-}
-
-func (c *Client) startEventListener(ctx context.Context, sessionID string) <-chan struct{} {
-	idleChan := make(chan struct{}, 1)
-
-	go func() {
-		defer close(idleChan)
-
-		req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/event", nil)
-		if err != nil {
-			return
-		}
-		req.Header.Set("Accept", "text/event-stream")
-
-		client := &http.Client{}
-		resp, err := client.Do(req)
-		if err != nil {
-			return
-		}
-		defer resp.Body.Close()
-
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-
-			data := strings.TrimPrefix(line, "data: ")
-			var event SSEEvent
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				continue
-			}
-
-			if event.Type == "session.idle" {
-				var props struct {
-					SessionID string `json:"sessionID"`
-				}
-				if err := json.Unmarshal(event.Properties, &props); err == nil {
-					if props.SessionID == sessionID {
-						select {
-						case idleChan <- struct{}{}:
-						default:
-						}
-						return
-					}
-				}
-			}
-		}
-	}()
-
-	return idleChan
 }
 
 func (c *Client) getMessages(sessionID string) ([]MessageResponse, error) {
@@ -306,6 +302,10 @@ func (c *Client) GenerateCommitMessage(stagedDiff string) (string, error) {
 		return "", err
 	}
 
+	if err := c.ensureDefaultModel(); err != nil {
+		return "", err
+	}
+
 	prompt := fmt.Sprintf(`Generate a concise git commit message for the following staged changes.
 Follow conventional commit format (type: description).
 Keep the summary line under 72 characters.
@@ -319,34 +319,16 @@ Do not use any tools, just respond with plain text containing only the commit me
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	idleChan := c.startEventListener(ctx, session.ID)
-
-	time.Sleep(100 * time.Millisecond)
-
-	if err := c.sendMessageAsync(session.ID, prompt); err != nil {
-		return "", fmt.Errorf("failed to send message: %w", err)
-	}
-
-	select {
-	case <-idleChan:
-	case <-ctx.Done():
-	}
-
-	messages, err := c.getMessages(session.ID)
+	response, err := c.sendMessage(session.ID, prompt)
 	if err != nil {
-		return "", fmt.Errorf("failed to get messages: %w", err)
+		return "", err
 	}
-
-	response := c.extractAssistantResponse(messages)
 	if response == "" {
 		if err := c.waitForIdleWithPolling(session.ID, 30*time.Second); err != nil {
 			return "", fmt.Errorf("no response received from AI: %w", err)
 		}
 
-		messages, err = c.getMessages(session.ID)
+		messages, err := c.getMessages(session.ID)
 		if err != nil {
 			return "", fmt.Errorf("failed to get messages: %w", err)
 		}
