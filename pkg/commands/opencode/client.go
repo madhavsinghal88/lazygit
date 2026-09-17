@@ -116,6 +116,10 @@ type providerResponse struct {
 	Default   map[string]string `json:"default"`
 }
 
+// builtinProviderID is OpenCode's own provider, whose free models need no
+// external credentials and so are the most reliable default.
+const builtinProviderID = "opencode"
+
 func (c *Client) ensureDefaultModel() error {
 	if c.providerID != "" && c.modelID != "" {
 		return nil
@@ -137,7 +141,7 @@ func (c *Client) ensureDefaultModel() error {
 		return fmt.Errorf("failed to decode providers: %w", err)
 	}
 
-	for _, providerID := range providers.Connected {
+	for _, providerID := range preferProvider(providers.Connected, builtinProviderID) {
 		modelID, ok := providers.Default[providerID]
 		if ok && modelID != "" {
 			c.providerID = providerID
@@ -147,6 +151,25 @@ func (c *Client) ensureDefaultModel() error {
 	}
 
 	return fmt.Errorf("no connected OpenCode providers found; run `opencode providers login`")
+}
+
+// preferProvider returns the given provider IDs with preferred moved to the
+// front. Third-party providers can be listed as connected while their
+// credentials are stale, in which case prompting fails; the built-in provider
+// is preferred so that a broken credential elsewhere doesn't break generation.
+func preferProvider(providerIDs []string, preferred string) []string {
+	ordered := make([]string, 0, len(providerIDs))
+	for _, id := range providerIDs {
+		if id == preferred {
+			ordered = append(ordered, id)
+		}
+	}
+	for _, id := range providerIDs {
+		if id != preferred {
+			ordered = append(ordered, id)
+		}
+	}
+	return ordered
 }
 
 func (c *Client) createSession() (*Session, error) {
