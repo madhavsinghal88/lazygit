@@ -7,9 +7,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jesseduffield/lazygit/pkg/commands/antigravity"
 	"github.com/jesseduffield/lazygit/pkg/commands/git_commands"
 	"github.com/jesseduffield/lazygit/pkg/commands/models"
-	"github.com/jesseduffield/lazygit/pkg/commands/opencode"
 	"github.com/jesseduffield/lazygit/pkg/config"
 	"github.com/jesseduffield/lazygit/pkg/gocui"
 	"github.com/jesseduffield/lazygit/pkg/gui/context"
@@ -24,7 +24,7 @@ type WorkingTreeHelper struct {
 	commitsHelper        *CommitsHelper
 	gpgHelper            *GpgHelper
 	mergeAndRebaseHelper *MergeAndRebaseHelper
-	opencodeClient       *opencode.Client
+	antigravityClient    *antigravity.Client
 }
 
 func NewWorkingTreeHelper(
@@ -40,7 +40,7 @@ func NewWorkingTreeHelper(
 		commitsHelper:        commitsHelper,
 		gpgHelper:            gpgHelper,
 		mergeAndRebaseHelper: mergeAndRebaseHelper,
-		opencodeClient:       opencode.NewDefaultClient(),
+		antigravityClient:    antigravity.NewClient(),
 	}
 }
 
@@ -237,7 +237,7 @@ func (self *WorkingTreeHelper) HandleCommitPress() error {
 				return nil
 			}
 
-			generatedMessage, err := self.opencodeClient.GenerateCommitMessage(stagedDiff)
+			generatedMessage, err := self.antigravityClient.GenerateCommitMessage(stagedDiff)
 			if err != nil {
 				self.c.OnUIThread(func() error {
 					self.c.ErrorToast(fmt.Sprintf(self.c.Tr.GeneratingCommitMessageFailedError, err.Error()))

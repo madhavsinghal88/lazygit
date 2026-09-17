@@ -321,33 +321,34 @@ third-party code we use is vendored under `vendor/`, so dependency sources are
 reachable from inside the working tree — search there instead of the host
 filesystem.
 
-## OpenCode commit message generation
+## Antigravity commit message generation
 
 This repo has a local feature (not in upstream lazygit) that auto-generates
-commit messages from staged diffs using OpenCode. The feature lives in three
-files:
+commit messages from staged diffs using Google's Antigravity CLI (`agy`). The
+feature lives in two files:
 
-- **`pkg/commands/opencode/client.go`** — HTTP client that talks to the OpenCode
-  server's ACP API. Auto-starts `opencode serve --pure` as a child process on
-  first use (`EnsureRunning()`), removing the need to manage a server manually.
+- **`pkg/commands/antigravity/client.go`** — runs `agy --model
+  gemini-3.7-flash-low --print <prompt>` (free-tier, low-effort Gemini Flash)
+  with the staged diff inline in the prompt.
 - **`pkg/gui/controllers/helpers/working_tree_helper.go`** — `HandleCommitPress()`
   uses preserved messages and commit prefixes first; if neither applies, it
   falls through to a `WithWaitingStatus` block that calls
-  `opencodeClient.GenerateCommitMessage()`.
-- **`pkg/i18n/english.go`** — two i18n strings: `GeneratingCommitMessageStatus`
-  and `GeneratingCommitMessageFailedError`.
+  `antigravityClient.GenerateCommitMessage()`.
+
+The two i18n strings (`GeneratingCommitMessageStatus` and
+`GeneratingCommitMessageFailedError`) live in `pkg/i18n/english.go`.
 
 ### Conflict-prone boundary
 
 `HandleCommitPress()` in `working_tree_helper.go` is the most likely conflict
 site when rebasing on upstream. Our version replaces the tail of the function:
 instead of returning directly to `HandleCommitPressWithMessage`, it checks
-`initialMessage` and, if empty, enters the OpenCode generation branch. The
-`openCommitMessagePanelWithMessage` helper is also ours. When merging
-upstream changes, preserve:
+`initialMessage` and, if empty, enters the Antigravity generation branch. The
+`openCommitMessagePanelWithMessage` helper is also ours. When merging upstream
+changes, preserve:
 
 1. The preserved-message and commit-prefix logic at the top (shared with
    upstream).
-2. The `if initialMessage != ""` guard — OpenCode generation is the fallback.
+2. The `if initialMessage != ""` guard — Antigravity generation is the fallback.
 3. The `openCommitMessagePanelWithMessage` method.
-4. The `opencode` import in the import block.
+4. The `antigravity` import in the import block.
